@@ -64,11 +64,28 @@ def create_spark_session(include_azure_storage: bool = False) -> SparkSession:
     if include_azure_storage or azure_storage_package:
         spark_packages.append(azure_storage_package)
 
-    return (
-        SparkSession.builder.appName("StreamingETL Kafka Reader")
-        .config("spark.jars.packages", ",".join(spark_packages))
-        .getOrCreate()
+    spark_builder = SparkSession.builder.appName("StreamingETL Kafka Reader").config(
+        "spark.jars.packages",
+        ",".join(spark_packages),
     )
+
+    optional_spark_configs = {
+        "spark.jars.ivy": os.getenv("SPARK_IVY_DIR"),
+        "spark.sql.shuffle.partitions": os.getenv("SPARK_SQL_SHUFFLE_PARTITIONS"),
+        "spark.sql.adaptive.enabled": os.getenv("SPARK_ADAPTIVE_EXECUTION_ENABLED"),
+        "spark.sql.adaptive.coalescePartitions.enabled": os.getenv(
+            "SPARK_ADAPTIVE_COALESCE_PARTITIONS_ENABLED"
+        ),
+        "spark.sql.sources.partitionOverwriteMode": os.getenv(
+            "SPARK_PARTITION_OVERWRITE_MODE"
+        ),
+    }
+
+    for config_name, config_value in optional_spark_configs.items():
+        if config_value:
+            spark_builder = spark_builder.config(config_name, config_value)
+
+    return spark_builder.getOrCreate()
 
 
 def main() -> None:

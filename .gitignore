@@ -5,9 +5,16 @@ build/
 dist/
 wheels/
 *.egg-info
+*.log
+*.db
+.ipynb_checkpoints/
 
 # Virtual environments
 .venv
+
+# Local Airflow runtime state
+src/airflow/logs/
+src/airflow/data/
 
 # Local environment files. Keep .env.example committed as documentation.
 .env

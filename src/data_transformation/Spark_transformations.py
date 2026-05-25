@@ -23,10 +23,12 @@ from pyspark.sql.functions import (
 # 2. running directly from this folder
 try:
     from . import azure_storage_utils
+    from . import data_quality
     from . import data_loading_Spark
     from . import spark_data_extraction_fromKafka
 except ImportError:
     import azure_storage_utils
+    import data_quality
     import data_loading_Spark
     import spark_data_extraction_fromKafka
 
@@ -46,6 +48,43 @@ def parse_args() -> argparse.Namespace:
         "--write-azure",
         action="store_true",
         help="Same as --write-silver. Kept so older commands still work.",
+    )
+    parser.add_argument(
+        "--preview-only",
+        action="store_true",
+        help="Print sample rows without writing Silver or quarantine data.",
+    )
+    parser.add_argument(
+        "--no-preview",
+        action="store_true",
+        help="Skip printing sample rows. Useful inside Airflow.",
+    )
+    parser.add_argument(
+        "--backfill-start-date",
+        default=None,
+        help="Only process records on or after this yyyy-mm-dd processing date.",
+    )
+    parser.add_argument(
+        "--backfill-end-date",
+        default=None,
+        help="Only process records on or before this yyyy-mm-dd processing date.",
+    )
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=None,
+        help="For normal runs, reprocess this many recent processing dates.",
+    )
+    parser.add_argument(
+        "--late-arrival-days",
+        type=int,
+        default=2,
+        help="Mark records as late when ingestion is this many days after event date.",
+    )
+    parser.add_argument(
+        "--strict-quality",
+        action="store_true",
+        help="Fail the run when any records are sent to quarantine.",
     )
     return parser.parse_args()
 
@@ -124,7 +163,7 @@ def transform_dataframe(loaded_df: DataFrame) -> DataFrame:
     )
 
     # I return only the columns I want to use downstream as my cleaned table.
-    return cleaned_df.select(
+    output_columns = [
         "event_id",
         "meta_id",
         "event_type",
@@ -149,7 +188,23 @@ def transform_dataframe(loaded_df: DataFrame) -> DataFrame:
         "kafka_partition",
         "kafka_offset",
         "kafka_timestamp",
+    ]
+
+    # These columns exist when the dataframe came through data_quality.py.
+    optional_quality_columns = [
+        "arrival_lag_days",
+        "is_late_arriving",
+        "processing_window_date",
+        "quality_checked_at",
+        "quality_rule_version",
+    ]
+    output_columns.extend(
+        column_name
+        for column_name in optional_quality_columns
+        if column_name in cleaned_df.columns
     )
+
+    return cleaned_df.select(*output_columns)
 
 
 def load_transformed_dataframe() -> DataFrame:
@@ -175,6 +230,23 @@ def write_dataframe_to_silver_storage(
     )
 
 
+def write_quarantine_dataframe_to_azure(
+    spark: SparkSession,
+    quarantine_df: DataFrame,
+) -> str:
+    # I keep rejected records in a quarantine layer so I can debug or replay them.
+    return azure_storage_utils.write_dataframe_to_lake(
+        spark=spark,
+        dataframe=data_quality.select_quarantine_columns(quarantine_df),
+        container_env_name="AZURE_QUARANTINE_CONTAINER_NAME",
+        path_env_name="AZURE_QUARANTINE_OUTPUT_PATH",
+        format_env_name="AZURE_QUARANTINE_OUTPUT_FORMAT",
+        mode_env_name="AZURE_QUARANTINE_WRITE_MODE",
+        partition_columns_env_name="AZURE_QUARANTINE_PARTITION_COLUMNS",
+        default_partition_columns="processing_window_date,quality_error_category",
+    )
+
+
 def main() -> None:
     # I configure Java before creating Spark because Spark needs a supported JVM.
     spark_data_extraction_fromKafka.configure_java_home()
@@ -186,16 +258,48 @@ def main() -> None:
     spark.sparkContext.setLogLevel("WARN")
 
     try:
-        # I load Bronze messages, clean them, then print the schema and sample rows.
+        # I load Bronze, validate it, split bad records, then clean the good records.
         loaded_df = data_loading_Spark.load_dataframe(spark)
-        transformed_df = transform_dataframe(loaded_df)
+        quality_ready_df = data_quality.prepare_for_quality_checks(
+            loaded_df,
+            late_arrival_days=args.late_arrival_days,
+        )
+        windowed_df = data_quality.apply_processing_window(
+            quality_ready_df,
+            backfill_start_date=args.backfill_start_date,
+            backfill_end_date=args.backfill_end_date,
+            lookback_days=args.lookback_days,
+        )
+        valid_df, quarantine_df = data_quality.split_valid_and_quarantine(windowed_df)
+        transformed_df = transform_dataframe(valid_df)
+        quarantine_count = None
 
-        transformed_df.printSchema()
-        transformed_df.show(args.limit, truncate=False)
+        if not args.no_preview or args.strict_quality:
+            # I only count quarantine rows when I need to display or enforce it.
+            # Scheduled runs avoid this extra full-data action to keep Airflow lighter.
+            quarantine_count = quarantine_df.count()
 
-        if args.write_silver or args.write_azure:
+        if not args.no_preview:
+            transformed_df.printSchema()
+            transformed_df.show(args.limit, truncate=False)
+            if quarantine_count is not None and quarantine_count:
+                print(f"Quarantine records found: {quarantine_count}")
+
+        should_write = (args.write_silver or args.write_azure) and not args.preview_only
+
+        if should_write:
             output_path = write_dataframe_to_silver_storage(spark, transformed_df)
             print(f"Silver dataframe written to: {output_path}")
+            quarantine_path = write_quarantine_dataframe_to_azure(
+                spark,
+                quarantine_df,
+            )
+            print(f"Quarantine dataframe written to: {quarantine_path}")
+
+        if args.strict_quality and quarantine_count:
+            raise RuntimeError(
+                f"Data quality failed. {quarantine_count} record(s) went to quarantine."
+            )
     finally:
         spark.stop()
 

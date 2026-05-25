@@ -68,6 +68,30 @@ def read_kafka_messages(spark: SparkSession) -> DataFrame:
     )
 
 
+def read_kafka_stream(spark: SparkSession) -> DataFrame:
+    # I use Spark Structured Streaming here so Kafka offsets are checkpointed.
+    return (
+        spark.readStream.format("kafka")
+        .option(
+            "kafka.bootstrap.servers",
+            spark_data_extraction_fromKafka.get_required_env("KAFKA_BOOTSTRAP_SERVERS"),
+        )
+        .option(
+            "subscribe",
+            spark_data_extraction_fromKafka.get_required_env("KAFKA_TOPIC"),
+        )
+        .option(
+            "startingOffsets",
+            spark_data_extraction_fromKafka.get_optional_env(
+                "KAFKA_STREAM_STARTING_OFFSETS"
+            )
+            or "earliest",
+        )
+        .option("failOnDataLoss", "false")
+        .load()
+    )
+
+
 def create_raw_dataframe_from_kafka(kafka_df: DataFrame) -> DataFrame:
     # I keep Bronze close to the Kafka record so I can replay/parse it again later.
     return kafka_df.select(
@@ -121,6 +145,7 @@ def create_dataframe_from_raw_messages(
         "kafka_offset",
         "kafka_timestamp",
         "message_key",
+        "raw_message",
         "bronze_ingested_at",
         "source_system",
         col("event.meta.id").alias("meta_id"),

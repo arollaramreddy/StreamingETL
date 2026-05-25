@@ -5,9 +5,14 @@ __pycache__
 *.pyc
 *.pyo
 *.pyd
+*.log
+*.db
+.ipynb_checkpoints
 .DS_Store
 .pytest_cache
 .mypy_cache
 .ruff_cache
 dist
 build
+src/airflow/logs
+src/airflow/data

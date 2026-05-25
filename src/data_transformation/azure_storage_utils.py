@@ -29,11 +29,17 @@ def configure_azure_storage_access(spark: SparkSession) -> None:
     # I use account-key auth for local testing. Later this can change to SAS/OAuth.
     account_name = get_required_runtime_env("AZURE_STORAGE_ACCOUNT_NAME")
     account_key = get_required_runtime_env("AZURE_STORAGE_ACCOUNT_KEY")
+    account_host = f"{account_name}.dfs.core.windows.net"
+    auth_type_key = f"fs.azure.account.auth.type.{account_host}"
+    storage_key = f"fs.azure.account.key.{account_host}"
 
-    spark.conf.set(
-        f"fs.azure.account.key.{account_name}.dfs.core.windows.net",
-        account_key,
-    )
+    spark.conf.set(auth_type_key, "SharedKey")
+    spark.conf.set(storage_key, account_key)
+
+    # I also set Hadoop config because manual filesystem checks use this directly.
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    hadoop_conf.set(auth_type_key, "SharedKey")
+    hadoop_conf.set(storage_key, account_key)
 
 
 def build_abfss_path(
@@ -54,6 +60,31 @@ def build_abfss_path(
     )
 
 
+def lake_path_has_data_files(spark: SparkSession, path: str) -> bool:
+    # I check for real data files before Spark tries to infer a Parquet schema.
+    hadoop_path = spark._jvm.org.apache.hadoop.fs.Path(path)
+    hadoop_conf = spark._jsc.hadoopConfiguration()
+
+    try:
+        file_system = hadoop_path.getFileSystem(hadoop_conf)
+        if not file_system.exists(hadoop_path):
+            return False
+
+        for file_status in file_system.listStatus(hadoop_path):
+            file_name = file_status.getPath().getName()
+            if file_status.isFile() and not file_name.startswith("_"):
+                return True
+            if file_status.isDirectory() and lake_path_has_data_files(
+                spark,
+                file_status.getPath().toString(),
+            ):
+                return True
+    except Exception:
+        return False
+
+    return False
+
+
 def read_dataframe_from_lake(
     spark: SparkSession,
     container_env_name: str,
@@ -65,6 +96,13 @@ def read_dataframe_from_lake(
 
     input_path = build_abfss_path(container_env_name, path_env_name)
     input_format = get_optional_runtime_env(format_env_name, default_format)
+
+    if input_format == "parquet" and not lake_path_has_data_files(spark, input_path):
+        raise RuntimeError(
+            f"No Parquet data files found at {input_path}. "
+            "Run the upstream pipeline step before reading this layer."
+        )
+
     return spark.read.format(input_format).load(input_path)
 
 

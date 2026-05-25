@@ -1,11 +1,13 @@
-# Local Kafka stack for the StreamingETL learning project.
+# Local runtime stack for StreamingETL.
 #
-# Start it with:
+# Kafka and Kafka UI start by default:
 #   docker compose up -d
 #
-# Host Python scripts connect to localhost:9092.
-# Containerized Python/Spark jobs connect to kafka:29092.
-# Kafka UI opens in your browser at http://localhost:9091.
+# Continuous-ish ingestion to Bronze:
+#   docker compose --profile streaming up -d --build
+#
+# Airflow orchestration and dashboard:
+#   docker compose --profile airflow --profile dashboard up -d --build
 
 x-streamingetl-app: &streamingetl-app
   build:
@@ -15,52 +17,72 @@ x-streamingetl-app: &streamingetl-app
   env_file:
     - .env
   environment:
-    # Inside Docker, the app must use Kafka's internal listener, not localhost.
+    # Inside Docker, app containers use Kafka's internal listener.
     KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_DOCKER_BOOTSTRAP_SERVERS:-kafka:29092}
     SPARK_LOCAL_IP: 127.0.0.1
   volumes:
     # I cache Spark/Ivy connector jars so every run does not download them again.
     - spark_ivy_cache:/root/.ivy2.5.2
 
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+  image: ${AIRFLOW_IMAGE:-streamingetl-airflow:local}
+  env_file:
+    - .env
+  environment:
+    AIRFLOW_HOME: /opt/airflow
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: ${AIRFLOW_DAGS_ARE_PAUSED_AT_CREATION:-false}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/data/airflow.db
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_DOCKER_BOOTSTRAP_SERVERS:-kafka:29092}
+    PYTHONPATH: /opt/airflow/project/src
+    SPARK_LOCAL_IP: 127.0.0.1
+    SPARK_IVY_DIR: /tmp/spark-ivy-cache
+  volumes:
+    - .:/opt/airflow/project
+    - ./src/airflow/dags:/opt/airflow/dags
+    - airflow_data:/opt/airflow/data
+    - airflow_logs:/opt/airflow/logs
+    - spark_ivy_cache:/tmp/spark-ivy-cache
+
 services:
   kafka:
     image: ${KAFKA_IMAGE:-bitnamilegacy/kafka:3.7.0}
-    container_name: streamingetl-kafka
+    container_name: ${KAFKA_CONTAINER_NAME:-streamingetl-kafka}
+    restart: unless-stopped
     ports:
-      # Host port 9092 maps to the broker listener used by kafka_extraction.py.
       - "${KAFKA_EXTERNAL_PORT:-9092}:9092"
     environment:
-      # Run Kafka in single-node KRaft mode, so ZooKeeper is not needed.
-      KAFKA_CFG_NODE_ID: "1"
-      KAFKA_CFG_PROCESS_ROLES: "broker,controller"
-      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
-
-      # INTERNAL is for other Docker containers. EXTERNAL is for your laptop.
-      KAFKA_CFG_LISTENERS: "INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093"
-      KAFKA_CFG_ADVERTISED_LISTENERS: "INTERNAL://kafka:29092,EXTERNAL://localhost:${KAFKA_EXTERNAL_PORT:-9092}"
-      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"
-      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: "INTERNAL"
-      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
-
-      # This is for local development only. Production clusters should use auth/TLS.
-      ALLOW_PLAINTEXT_LISTENER: "yes"
-
-      # Helpful defaults for a one-broker local cluster.
-      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
-      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
-      KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
-      KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      # Single-node KRaft mode keeps local Kafka simple and avoids ZooKeeper.
+      KAFKA_CFG_NODE_ID: ${KAFKA_NODE_ID:-1}
+      KAFKA_CFG_PROCESS_ROLES: ${KAFKA_PROCESS_ROLES:-broker,controller}
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: ${KAFKA_CONTROLLER_QUORUM_VOTERS:-1@kafka:9093}
+      KAFKA_CFG_LISTENERS: ${KAFKA_LISTENERS:-INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093}
+      KAFKA_CFG_ADVERTISED_LISTENERS: ${KAFKA_ADVERTISED_LISTENERS:-INTERNAL://kafka:29092,EXTERNAL://localhost:9092}
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: ${KAFKA_LISTENER_SECURITY_PROTOCOL_MAP:-INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT}
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: ${KAFKA_INTER_BROKER_LISTENER_NAME:-INTERNAL}
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: ${KAFKA_CONTROLLER_LISTENER_NAMES:-CONTROLLER}
+      ALLOW_PLAINTEXT_LISTENER: ${KAFKA_ALLOW_PLAINTEXT_LISTENER:-yes}
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: ${KAFKA_AUTO_CREATE_TOPICS_ENABLE:-true}
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: ${KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR:-1}
+      KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: ${KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR:-1}
+      KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: ${KAFKA_TRANSACTION_STATE_LOG_MIN_ISR:-1}
     volumes:
       - kafka_data:/bitnami/kafka
     healthcheck:
       test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:29092 --list >/dev/null 2>&1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+      interval: ${KAFKA_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${KAFKA_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${KAFKA_HEALTHCHECK_RETRIES:-10}
 
   kafka-init:
     image: ${KAFKA_IMAGE:-bitnamilegacy/kafka:3.7.0}
-    container_name: streamingetl-kafka-init
+    container_name: ${KAFKA_INIT_CONTAINER_NAME:-streamingetl-kafka-init}
     depends_on:
       kafka:
         condition: service_healthy
@@ -71,21 +93,20 @@ services:
         kafka-topics.sh --bootstrap-server kafka:29092 \
           --create --if-not-exists \
           --topic ${KAFKA_TOPIC:-wikimedia.recent_changes} \
-          --partitions 3 \
-          --replication-factor 1
+          --partitions ${KAFKA_TOPIC_PARTITIONS:-3} \
+          --replication-factor ${KAFKA_TOPIC_REPLICATION_FACTOR:-1}
 
   kafka-ui:
     image: ${KAFKA_UI_IMAGE:-provectuslabs/kafka-ui:latest}
-    container_name: streamingetl-kafka-ui
+    container_name: ${KAFKA_UI_CONTAINER_NAME:-streamingetl-kafka-ui}
+    restart: unless-stopped
     depends_on:
       kafka:
         condition: service_healthy
     ports:
-      # I open Kafka UI on localhost:9091 so I can inspect topics in a browser.
       - "${KAFKA_UI_PORT:-9091}:8080"
     environment:
-      KAFKA_CLUSTERS_0_NAME: local
-      # Kafka UI runs inside Docker, so it uses Kafka's internal listener.
+      KAFKA_CLUSTERS_0_NAME: ${KAFKA_UI_CLUSTER_NAME:-local}
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
 
   wikimedia-producer:
@@ -120,6 +141,37 @@ services:
       - --limit
       - "${SPARK_PREVIEW_LIMIT:-5}"
 
+  wikimedia-producer-stream:
+    <<: *streamingetl-app
+    container_name: streamingetl-wikimedia-producer-stream
+    profiles: ["streaming"]
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    command:
+      - python
+      - src/data_extraction/kafka_extraction.py
+      - --limit
+      - "0"
+
+  kafka-to-bronze-stream:
+    <<: *streamingetl-app
+    container_name: streamingetl-kafka-to-bronze-stream
+    profiles: ["streaming"]
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    command:
+      - python
+      - src/data_transformation/kafka_to_bronze.py
+      - --stream
+
   silver-transform:
     <<: *streamingetl-app
     container_name: streamingetl-silver-transform
@@ -147,10 +199,30 @@ services:
       - --limit
       - "${SPARK_PREVIEW_LIMIT:-5}"
 
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    container_name: ${REDIS_CONTAINER_NAME:-streamingetl-redis}
+    profiles: ["dashboard"]
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+
   dashboard:
     <<: *streamingetl-app
     container_name: streamingetl-dashboard
     profiles: ["dashboard"]
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_DOCKER_BOOTSTRAP_SERVERS:-kafka:29092}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      SPARK_LOCAL_IP: 127.0.0.1
     ports:
       - "${STREAMLIT_PORT:-8501}:8501"
     command:
@@ -160,6 +232,48 @@ services:
       - --server.address=0.0.0.0
       - --server.port=8501
 
+  airflow-init:
+    <<: *airflow-common
+    container_name: streamingetl-airflow-init
+    profiles: ["airflow"]
+    user: root
+    entrypoint: /bin/bash
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - -c
+      - |
+        mkdir -p /opt/airflow/data /opt/airflow/logs /tmp/spark-ivy-cache && \
+        chown -R airflow:0 /opt/airflow/data /opt/airflow/logs /tmp/spark-ivy-cache && \
+        su airflow -s /bin/bash -c "airflow db migrate" && \
+        (su airflow -s /bin/bash -c "airflow users create \
+          --username \"$${AIRFLOW_ADMIN_USERNAME:-admin}\" \
+          --password \"$${AIRFLOW_ADMIN_PASSWORD:-admin}\" \
+          --firstname Streaming \
+          --lastname ETL \
+          --role Admin \
+          --email \"$${AIRFLOW_ADMIN_EMAIL:-admin@example.com}\"" || true)
+
+  airflow:
+    <<: *airflow-common
+    container_name: streamingetl-airflow
+    profiles: ["airflow"]
+    restart: unless-stopped
+    entrypoint: /bin/bash
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    ports:
+      - "${AIRFLOW_WEBSERVER_PORT:-8080}:8080"
+    command:
+      - -c
+      - |
+        airflow scheduler & exec airflow webserver --port 8080
+
 volumes:
   kafka_data:
   spark_ivy_cache:
+  redis_data:
+  airflow_data:
+  airflow_logs:

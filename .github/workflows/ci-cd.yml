@@ -1,0 +1,37 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Compile Python files
+        run: uv run python -m compileall -q main.py src
+
+      - name: Create CI environment file
+        run: cp .env.example .env
+
+      - name: Validate Docker Compose
+        run: docker compose --profile streaming --profile etl --profile airflow --profile dashboard config --quiet
+
+      - name: Build app image
+        run: docker compose build dashboard

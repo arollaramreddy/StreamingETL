@@ -1,6 +1,9 @@
 # Data Visualization
 
-This folder contains the Streamlit dashboard for the Gold star-schema layer.
+This folder contains the Streamlit dashboard for the Gold dashboard tables.
+It is built as a serving-layer dashboard: Streamlit reads pre-aggregated Gold
+tables, uses Redis when available, exposes freshness checks, and provides CSV
+exports for operations and analysis.
 
 Run it from the project root:
 
@@ -8,11 +11,13 @@ Run it from the project root:
 uv run streamlit run src/data_visualization/gold_dashboard.py
 ```
 
-The dashboard reads these Gold tables from Azure Storage:
+The dashboard reads these Gold aggregate tables from Azure Storage:
 
-- `dim_date`
-- `dim_wiki`
-- `dim_page`
-- `dim_user`
-- `dim_event_type`
-- `fact_recent_changes`
+- `agg_dashboard_kpis`
+- `agg_events_by_date`
+- `agg_events_by_window`
+- `agg_events_by_type`
+- `agg_events_by_wiki`
+- `agg_top_users`
+- `agg_top_pages`
+- `recent_events_snapshot`
