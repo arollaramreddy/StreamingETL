@@ -29,9 +29,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # I load my root .env first, so the os.getenv defaults below can use it.
 load_dotenv(PROJECT_ROOT / ".env")
 
-# These are my local Docker Compose defaults unless I override them in .env.
-DEFAULT_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-DEFAULT_TOPIC = os.getenv("KAFKA_TOPIC", "wikimedia.recent_changes")
+
+def get_required_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+# I keep these in .env so local Kafka can become Event Hubs later without code edits.
+DEFAULT_BOOTSTRAP_SERVERS = get_required_env("KAFKA_BOOTSTRAP_SERVERS")
+DEFAULT_TOPIC = get_required_env("KAFKA_TOPIC")
+DEFAULT_PRODUCER_ACKS = os.getenv("KAFKA_PRODUCER_ACKS", "all")
+DEFAULT_PRODUCER_RETRIES = int(os.getenv("KAFKA_PRODUCER_RETRIES", "5"))
+DEFAULT_PRODUCER_LINGER_MS = int(os.getenv("KAFKA_PRODUCER_LINGER_MS", "100"))
 
 
 def create_kafka_producer(bootstrap_servers: str) -> KafkaProducer:
@@ -49,10 +60,10 @@ def create_kafka_producer(bootstrap_servers: str) -> KafkaProducer:
         # I use a key when I can, so related edits land on the same partition.
         "key_serializer": lambda key: key.encode("utf-8") if key else None,
         # I wait for Kafka to acknowledge the message before treating it as sent.
-        "acks": "all",
-        "retries": 5,
+        "acks": DEFAULT_PRODUCER_ACKS,
+        "retries": DEFAULT_PRODUCER_RETRIES,
         # I give Kafka a tiny window to batch nearby events together.
-        "linger_ms": 100,
+        "linger_ms": DEFAULT_PRODUCER_LINGER_MS,
     }
 
     # If I later use a secured Kafka cluster, I keep those secrets in .env.

@@ -13,17 +13,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # I load my root .env so I can change source settings without editing code.
 load_dotenv(PROJECT_ROOT / ".env")
 
-STREAM_URL = os.getenv(
-    "WIKIMEDIA_STREAM_URL",
-    "https://stream.wikimedia.org/v2/stream/recentchange",
-)
+
+def get_required_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+STREAM_URL = get_required_env("WIKIMEDIA_STREAM_URL")
 
 # I send a User-Agent because Wikimedia asks stream clients to identify themselves.
 HEADERS = {
-    "User-Agent": os.getenv(
-        "WIKIMEDIA_USER_AGENT",
-        "StreamingETL/0.1 (educational ETL pipeline)",
-    ),
+    "User-Agent": get_required_env("WIKIMEDIA_USER_AGENT"),
 }
 
 
