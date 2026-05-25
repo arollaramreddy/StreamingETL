@@ -28,7 +28,6 @@ from data_transformation import spark_data_extraction_fromKafka  # noqa: E402
 
 st.set_page_config(
     page_title="StreamingETL Gold Dashboard",
-    page_icon="",
     layout="wide",
 )
 
@@ -136,11 +135,17 @@ def build_top_users(
     user_df: DataFrame,
     top_n: int,
 ) -> pd.DataFrame:
+    user_lookup_df = user_df.select(
+        "user_key",
+        col("event_user").alias("user_name"),
+        col("is_bot").alias("user_is_bot"),
+    )
+
     return to_pandas(
-        fact_df.join(user_df, "user_key", "left")
+        fact_df.join(user_lookup_df, "user_key", "left")
         .groupBy(
-            coalesce(col("event_user"), lit("unknown")).alias("event_user"),
-            coalesce(col("is_bot"), lit(False)).alias("is_bot"),
+            coalesce(col("user_name"), lit("unknown")).alias("event_user"),
+            coalesce(col("user_is_bot"), lit(False)).alias("is_bot"),
         )
         .agg(count("*").alias("events"))
         .orderBy(desc("events"))
@@ -153,11 +158,17 @@ def build_top_pages(
     page_df: DataFrame,
     top_n: int,
 ) -> pd.DataFrame:
+    page_lookup_df = page_df.select(
+        "page_key",
+        "page_title",
+        col("namespace").alias("page_namespace"),
+    )
+
     return to_pandas(
-        fact_df.join(page_df, "page_key", "left")
+        fact_df.join(page_lookup_df, "page_key", "left")
         .groupBy(
             coalesce(col("page_title"), lit("unknown")).alias("page_title"),
-            coalesce(col("namespace"), lit(-1)).alias("namespace"),
+            coalesce(col("page_namespace"), lit(-1)).alias("namespace"),
         )
         .agg(count("*").alias("events"))
         .orderBy(desc("events"))
@@ -173,19 +184,31 @@ def build_recent_events(
     event_type_df: DataFrame,
     row_limit: int,
 ) -> pd.DataFrame:
+    wiki_lookup_df = wiki_df.select("wiki_key", col("wiki").alias("wiki_name"))
+    page_lookup_df = page_df.select(
+        "page_key",
+        "page_title",
+        col("namespace").alias("page_namespace"),
+    )
+    user_lookup_df = user_df.select(
+        "user_key",
+        col("event_user").alias("user_name"),
+        col("is_bot").alias("user_is_bot"),
+    )
+
     return to_pandas(
-        fact_df.join(wiki_df, "wiki_key", "left")
-        .join(page_df, "page_key", "left")
-        .join(user_df, "user_key", "left")
+        fact_df.join(wiki_lookup_df, "wiki_key", "left")
+        .join(page_lookup_df, "page_key", "left")
+        .join(user_lookup_df, "user_key", "left")
         .join(event_type_df, "event_type_key", "left")
         .select(
             "event_datetime",
             "event_type",
-            "wiki",
+            col("wiki_name").alias("wiki"),
             "page_title",
-            "event_user",
-            "is_bot",
-            "namespace",
+            col("user_name").alias("event_user"),
+            col("user_is_bot").alias("is_bot"),
+            col("page_namespace").alias("namespace"),
             "comment",
         )
         .orderBy(desc("event_datetime"))
@@ -194,7 +217,7 @@ def build_recent_events(
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_dashboard_data(_refresh_token: int, top_n: int, row_limit: int) -> dict[str, pd.DataFrame]:
+def load_dashboard_data(refresh_token: int, top_n: int, row_limit: int) -> dict[str, pd.DataFrame]:
     # I cache the final pandas tables so the app feels responsive while exploring.
     spark = get_spark_session()
     tables = get_gold_dataframes(spark)
@@ -261,16 +284,24 @@ def render_bar_chart(dataframe: pd.DataFrame, index_column: str, value_column: s
 def main() -> None:
     st.title("Wikimedia Recent Changes")
 
+    if "refresh_token" not in st.session_state:
+        st.session_state.refresh_token = 0
+
     with st.sidebar:
         top_n = st.slider("Top N", min_value=5, max_value=30, value=10, step=5)
         row_limit = st.slider("Recent Rows", min_value=10, max_value=100, value=25, step=5)
         refresh_clicked = st.button("Refresh")
 
-    refresh_token = 1 if refresh_clicked else 0
+    if refresh_clicked:
+        st.session_state.refresh_token += 1
 
     try:
         with st.spinner("Loading Gold tables from Azure Storage..."):
-            dashboard_data = load_dashboard_data(refresh_token, top_n, row_limit)
+            dashboard_data = load_dashboard_data(
+                st.session_state.refresh_token,
+                top_n,
+                row_limit,
+            )
     except Exception as exc:
         st.error(str(exc))
         st.stop()

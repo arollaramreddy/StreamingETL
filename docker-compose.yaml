@@ -3,8 +3,24 @@
 # Start it with:
 #   docker compose up -d
 #
-# The Python producer connects from your host machine to localhost:9092.
+# Host Python scripts connect to localhost:9092.
+# Containerized Python/Spark jobs connect to kafka:29092.
 # Kafka UI opens in your browser at http://localhost:9091.
+
+x-streamingetl-app: &streamingetl-app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: ${STREAMINGETL_APP_IMAGE:-streamingetl-app:local}
+  env_file:
+    - .env
+  environment:
+    # Inside Docker, the app must use Kafka's internal listener, not localhost.
+    KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_DOCKER_BOOTSTRAP_SERVERS:-kafka:29092}
+    SPARK_LOCAL_IP: 127.0.0.1
+  volumes:
+    # I cache Spark/Ivy connector jars so every run does not download them again.
+    - spark_ivy_cache:/root/.ivy2.5.2
 
 services:
   kafka:
@@ -72,5 +88,78 @@ services:
       # Kafka UI runs inside Docker, so it uses Kafka's internal listener.
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
 
+  wikimedia-producer:
+    <<: *streamingetl-app
+    container_name: streamingetl-wikimedia-producer
+    profiles: ["etl"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    command:
+      - python
+      - src/data_extraction/kafka_extraction.py
+      - --limit
+      - "${PRODUCER_LIMIT:-5}"
+
+  kafka-to-bronze:
+    <<: *streamingetl-app
+    container_name: streamingetl-kafka-to-bronze
+    profiles: ["etl"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      wikimedia-producer:
+        condition: service_completed_successfully
+    command:
+      - python
+      - src/data_transformation/kafka_to_bronze.py
+      - --limit
+      - "${SPARK_PREVIEW_LIMIT:-5}"
+
+  silver-transform:
+    <<: *streamingetl-app
+    container_name: streamingetl-silver-transform
+    profiles: ["etl"]
+    depends_on:
+      kafka-to-bronze:
+        condition: service_completed_successfully
+    command:
+      - python
+      - src/data_transformation/Spark_transformations.py
+      - --limit
+      - "${SPARK_PREVIEW_LIMIT:-5}"
+      - --write-silver
+
+  gold-model:
+    <<: *streamingetl-app
+    container_name: streamingetl-gold-model
+    profiles: ["etl"]
+    depends_on:
+      silver-transform:
+        condition: service_completed_successfully
+    command:
+      - python
+      - src/data_transformation/silver_to_gold.py
+      - --limit
+      - "${SPARK_PREVIEW_LIMIT:-5}"
+
+  dashboard:
+    <<: *streamingetl-app
+    container_name: streamingetl-dashboard
+    profiles: ["dashboard"]
+    ports:
+      - "${STREAMLIT_PORT:-8501}:8501"
+    command:
+      - streamlit
+      - run
+      - src/data_visualization/gold_dashboard.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+
 volumes:
   kafka_data:
+  spark_ivy_cache:
