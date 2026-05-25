@@ -5,40 +5,66 @@ Step-by-step streaming ETL learning project.
 Current focus:
 
 1. Connect to the Wikimedia recent-change streaming source.
-2. Inspect the raw event schema.
-3. Normalize a few useful fields.
-4. Preview extracted rows.
+2. Produce raw Wikimedia events to Kafka.
+3. Use Docker Compose for a local Kafka broker.
 
 ## Files
 
 ```text
 main.py
-wikimedia_recent_changes_extract.py
+docker-compose.yaml
+.env.example
+src/data_extraction/wikimedia_recent_changes_extract.py
+src/data_extraction/kafka_extraction.py
 pyproject.toml
 uv.lock
 README.md
 ```
 
-## Inspect Source Schema
+## Environment
 
-The source emits data continuously. First, sample a few raw events and inspect the fields.
+Local settings and secrets live in `.env`. The committed `.env.example` file shows the expected keys.
 
 ```bash
-uv run python wikimedia_recent_changes_extract.py --schema-rows 3
+cp .env.example .env
 ```
 
-## Preview Extracted Rows
+Docker Compose reads `.env` automatically. The Python Kafka producer also loads it through `python-dotenv`.
 
-Preview normalized rows:
+## Local Kafka
+
+Start a local Kafka broker:
 
 ```bash
-uv run python wikimedia_recent_changes_extract.py --rows 5
+docker compose up -d
 ```
 
-Run continuously:
+Kafka UI is available at:
+
+```text
+http://localhost:9091
+```
+
+Produce Wikimedia recent-change events to Kafka:
 
 ```bash
-uv run python wikimedia_recent_changes_extract.py
+uv run python src/data_extraction/kafka_extraction.py --limit 10
+```
+
+The default Kafka topic is `wikimedia.recent_changes`, and the default broker is `localhost:9092`.
+
+Inspect produced Kafka messages:
+
+```bash
+docker compose exec kafka kafka-console-consumer.sh --bootstrap-server kafka:29092 --topic wikimedia.recent_changes --from-beginning --max-messages 10
+```
+
+## Inspect Source Events
+
+The source emits data continuously. Print raw Wikimedia events:
+
+```bash
+uv run python src/data_extraction/wikimedia_recent_changes_extract.py
 ```
 
 Stop the stream with `Ctrl + C`.
