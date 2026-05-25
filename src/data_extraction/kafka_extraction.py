@@ -174,7 +174,7 @@ def parse_args() -> argparse.Namespace:
         "--limit",
         type=int,
         default=None,
-        help="Stop after producing this many events. Omit to run continuously.",
+        help="Stop after producing this many events. Use 0 or omit to run continuously.",
     )
     parser.add_argument(
         "--log-level",
@@ -187,6 +187,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.limit is not None and args.limit <= 0:
+        args.limit = None
+
     logging.basicConfig(
         level=args.log_level,
         format="%(asctime)s %(levelname)s %(message)s",
