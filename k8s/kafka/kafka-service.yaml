@@ -1,0 +1,35 @@
+# Headless service for Kafka pod-to-pod DNS resolution (StatefulSet)
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless
+  namespace: streamingetl
+  labels:
+    app: kafka
+spec:
+feat(k8s): add Kafka headless + ClusterIP services for pod DNS and client access  selector:
+    app: kafka
+  ports:
+    - name: internal
+      port: 29092
+      targetPort: 29092
+    - name: controller
+      port: 9093
+      targetPort: 9093
+---
+# External service for clients outside the StatefulSet (e.g. Spark, Airflow, dashboard)
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: streamingetl
+  labels:
+    app: kafka
+spec:
+  type: ClusterIP
+  selector:
+    app: kafka
+  ports:
+    - name: kafka
+      port: 29092
+      targetPort: 29092
