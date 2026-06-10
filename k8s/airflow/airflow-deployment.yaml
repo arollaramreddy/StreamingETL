@@ -1,0 +1,118 @@
+# Airflow deployment — SequentialExecutor (single-container, SQLite backend).
+# For production scale, switch to CeleryExecutor with Postgres + Redis.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow
+  namespace: streamingetl
+  labels:
+    app: airflow
+    app.kubernetes.io/component: orchestration
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow
+  template:
+    metadata:
+      labels:
+        app: airflow
+    spec:
+      initContainers:
+        - name: airflow-init
+          image: streamingetl-airflow:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              airflow db migrate &&
+              airflow users create \
+                --username ${AIRFLOW_ADMIN_USERNAME:-admin} \
+                --password ${AIRFLOW_ADMIN_PASSWORD:-admin} \
+                --firstname Admin \
+                --lastname User \
+                --role Admin \
+                --email ${AIRFLOW_ADMIN_EMAIL:-admin@example.com} || true
+          envFrom:
+            - configMapRef:
+                name: streamingetl-config
+            - secretRef:
+                name: streamingetl-secrets
+          volumeMounts:
+            - name: airflow-data
+              mountPath: /opt/airflow/data
+      containers:
+        - name: airflow
+          image: streamingetl-airflow:latest
+          command: ["airflow", "standalone"]
+          ports:
+            - name: webserver
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: streamingetl-config
+            - secretRef:
+                name: streamingetl-secrets
+          env:
+            - name: AIRFLOW__CORE__EXECUTOR
+              value: "SequentialExecutor"
+            - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+              value: "sqlite:////opt/airflow/data/airflow.db"
+            - name: AIRFLOW__CORE__LOAD_EXAMPLES
+              value: "false"
+            - name: AIRFLOW__WEBSERVER__EXPOSE_CONFIG
+              value: "true"
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "kafka.streamingetl.svc.cluster.local:29092"
+            - name: SPARK_LOCAL_IP
+              value: "127.0.0.1"
+            - name: PYTHONPATH
+              value: "/opt/airflow/project/src"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 45
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: airflow-data
+              mountPath: /opt/airflow/data
+            - name: airflow-logs
+              mountPath: /opt/airflow/logs
+            - name: spark-ivy-cache
+              mountPath: /tmp/spark-ivy-cache
+      volumes:
+        - name: airflow-data
+          persistentVolumeClaim:
+            claimName: airflow-data-pvc
+        - name: airflow-logs
+          emptyDir: {}
+        - name: spark-ivy-cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: airflow-data-pvc
+  namespace: streamingetl
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
