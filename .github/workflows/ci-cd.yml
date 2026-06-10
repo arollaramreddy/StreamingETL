@@ -1,4 +1,133 @@
-name: CI/CD
+name: CI/CD — StreamingETL Production Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.13"
+  ACR_NAME: ${{ secrets.ACR_NAME }}
+  AKS_CLUSTER: ${{ secrets.AKS_CLUSTER_NAME }}
+  AKS_RESOURCE_GROUP: ${{ secrets.AKS_RESOURCE_GROUP }}
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # 1. Lint, compile, and run unit/smoke tests
+  # ─────────────────────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Compile Python files (syntax check)
+        run: uv run python -m compileall -q main.py src tests
+
+      - name: Create CI environment file
+        run: cp .env.example .env
+
+      - name: Run unit and smoke tests
+        run: uv run pytest tests/ -v --tb=short
+
+      - name: Validate Docker Compose config
+        run: docker compose --profile streaming --profile etl --profile airflow --profile dashboard config --quiet
+
+  # ─────────────────────────────────────────────────────────────
+  # 2. Build and push Docker images to ACR
+  # ─────────────────────────────────────────────────────────────
+  build:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Log in to ACR
+        run: az acr login --name ${{ env.ACR_NAME }}
+
+      - name: Build and push app image
+        run: |
+          docker build -f Dockerfile \
+            -t ${{ env.ACR_NAME }}.azurecr.io/streamingetl-app:${{ github.sha }} \
+            -t ${{ env.ACR_NAME }}.azurecr.io/streamingetl-app:latest .
+          docker push ${{ env.ACR_NAME }}.azurecr.io/streamingetl-app:${{ github.sha }}
+          docker push ${{ env.ACR_NAME }}.azurecr.io/streamingetl-app:latest
+
+      - name: Build and push airflow image
+        run: |
+          docker build -f Dockerfile.airflow \
+            -t ${{ env.ACR_NAME }}.azurecr.io/streamingetl-airflow:${{ github.sha }} \
+            -t ${{ env.ACR_NAME }}.azurecr.io/streamingetl-airflow:latest .
+          docker push ${{ env.ACR_NAME }}.azurecr.io/streamingetl-airflow:${{ github.sha }}
+          docker push ${{ env.ACR_NAME }}.azurecr.io/streamingetl-airflow:latest
+
+  # ─────────────────────────────────────────────────────────────
+  # 3. Deploy updated manifests to AKS
+  # ─────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to AKS
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ env.AKS_RESOURCE_GROUP }} \
+            --name ${{ env.AKS_CLUSTER }} \
+            --overwrite-existing
+
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/configmap.yaml
+          kubectl apply -f k8s/redis/
+          kubectl apply -f k8s/kafka/
+          kubectl apply -f k8s/airflow/
+          kubectl apply -f k8s/dashboard/
+
+      - name: Update image tags to new SHA
+        run: |
+          kubectl set image deployment/airflow \
+            airflow=${{ env.ACR_NAME }}.azurecr.io/streamingetl-airflow:${{ github.sha }} \
+            -n streamingetl
+          kubectl set image deployment/dashboard \
+            dashboard=${{ env.ACR_NAME }}.azurecr.io/streamingetl-app:${{ github.sha }} \
+            -n streamingetl
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/airflow -n streamingetl --timeout=120s
+          kubectl rollout status deployment/dashboard -n streamingetl --timeout=120s
+
+      - name: Verify pods are running
+        run: kubectl get pods -n streamingetlname: CI/CD
 
 on:
   push:
